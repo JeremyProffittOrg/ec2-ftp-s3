@@ -1,296 +1,37 @@
-name: Deploy FTP Server to EC2
-
+name: Retire FTP server
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
-
-env:
-  STACK_NAME: ftp-server-stack
-  AWS_REGION: us-east-2
-
+permissions:
+  contents: read
+concurrency:
+  group: ftp-server-production
+  cancel-in-progress: false
 jobs:
-  deploy:
+  retire:
+    if: github.ref == 'refs/heads/main' && github.repository == 'JeremyProffittOrg/ec2-ftp-s3'
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 15
     permissions:
       id-token: write
       contents: read
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify exact retirement guards
+        run: python -m unittest discover -s scripts -p 'test_retire_ftp.py'
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          role-session-name: gha-${{ github.event.repository.name }}-${{ github.run_id }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Upload CloudFormation template to S3
-        run: |
-          aws s3 cp cloudformation-template.yaml s3://${{ vars.CLOUDFORMATION_S3_BUCKET }}/cloudformation-template.yaml
-
-      - name: Delete existing stack to force fresh deployment
-        run: |
-          echo "Checking if stack exists..."
-
-          STACK_STATUS=$(aws cloudformation describe-stacks \
-            --stack-name ${{ env.STACK_NAME }} \
-            --query "Stacks[0].StackStatus" \
-            --output text 2>&1 || echo "DOES_NOT_EXIST")
-
-          echo "Stack status: $STACK_STATUS"
-
-          if [[ "$STACK_STATUS" != "DOES_NOT_EXIST" ]]; then
-            echo "Deleting existing stack to ensure fresh deployment with updated UserData..."
-            aws cloudformation delete-stack --stack-name ${{ env.STACK_NAME }}
-
-            echo "Waiting for stack deletion to complete..."
-            aws cloudformation wait stack-delete-complete --stack-name ${{ env.STACK_NAME }}
-            echo "Stack deleted successfully"
-          else
-            echo "No existing stack found, proceeding with fresh deployment"
-          fi
-
-      - name: Deploy CloudFormation stack
-        run: |
-          echo "Deploying CloudFormation stack..."
-
-          aws cloudformation deploy \
-            --template-file cloudformation-template.yaml \
-            --stack-name ${{ env.STACK_NAME }} \
-            --parameter-overrides \
-              InstanceType=${{ vars.INSTANCE_TYPE }} \
-              S3BucketName=${{ vars.S3_BUCKET }} \
-              FTPUser=${{ vars.FTP_USER }} \
-              FTPPassword=${{ secrets.FTP_PASSWORD }} \
-              DomainName=${{ vars.DOMAIN_NAME }} \
-              HostedZoneId=${{ vars.HOSTED_ZONE_ID }} \
-              SNSTopicArn=${{ vars.SNS_TOPIC_ARN }} \
-            --tags \
-              Project=ec2-ftp-s3 \
-              CostCenter=utility \
-              Environment=prod \
-              ManagedBy=cloudformation \
-              DeployedVia=github-actions \
-              Owner=jeremy \
-            --capabilities CAPABILITY_IAM \
-            --no-fail-on-empty-changeset
-
-      - name: Get EC2 instance details
-        id: instance
-        run: |
-          INSTANCE_ID=$(aws cloudformation describe-stacks \
-            --stack-name ${{ env.STACK_NAME }} \
-            --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" \
-            --output text)
-
-          PUBLIC_IP=$(aws cloudformation describe-stacks \
-            --stack-name ${{ env.STACK_NAME }} \
-            --query "Stacks[0].Outputs[?OutputKey=='PublicIP'].OutputValue" \
-            --output text)
-
-          EFS_ID=$(aws cloudformation describe-stacks \
-            --stack-name ${{ env.STACK_NAME }} \
-            --query "Stacks[0].Outputs[?OutputKey=='EFSFileSystemId'].OutputValue" \
-            --output text)
-
-          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
-          echo "public_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
-          echo "efs_id=$EFS_ID" >> $GITHUB_OUTPUT
-
-          echo "Instance ID: $INSTANCE_ID"
-          echo "Public IP: $PUBLIC_IP"
-          echo "EFS ID: $EFS_ID"
-
-      - name: Wait for EC2 instance to be running (max 15 minutes)
-        run: |
-          echo "Waiting for EC2 instance to be running..."
-          INSTANCE_ID="${{ steps.instance.outputs.instance_id }}"
-
-          MAX_WAIT=900  # 15 minutes
-          ELAPSED=0
-          INTERVAL=10
-
-          while [ $ELAPSED -lt $MAX_WAIT ]; do
-            STATE=$(aws ec2 describe-instances \
-              --instance-ids $INSTANCE_ID \
-              --query "Reservations[0].Instances[0].State.Name" \
-              --output text)
-
-            echo "Current state: $STATE (elapsed: ${ELAPSED}s)"
-
-            if [ "$STATE" = "running" ]; then
-              echo "Instance is running!"
-              break
-            fi
-
-            if [ "$STATE" = "terminated" ] || [ "$STATE" = "stopped" ]; then
-              echo "ERROR: Instance is in state: $STATE"
-              exit 1
-            fi
-
-            sleep $INTERVAL
-            ELAPSED=$((ELAPSED + INTERVAL))
-          done
-
-          if [ $ELAPSED -ge $MAX_WAIT ]; then
-            echo "ERROR: Timeout waiting for instance to be running"
-            exit 1
-          fi
-
-      - name: Wait for instance initialization (additional time for UserData + EFS setup)
-        run: |
-          echo "Waiting for instance to complete initialization (includes EFS utils build)..."
-          sleep 180
-
-      - name: Validate EC2 instance health checks
-        run: |
-          echo "Validating EC2 instance health..."
-          INSTANCE_ID="${{ steps.instance.outputs.instance_id }}"
-
-          # Check instance status checks
-          echo "Checking instance status checks..."
-          MAX_WAIT=600  # 10 minutes
-          ELAPSED=0
-          INTERVAL=15
-
-          while [ $ELAPSED -lt $MAX_WAIT ]; do
-            INSTANCE_STATUS=$(aws ec2 describe-instance-status \
-              --instance-ids $INSTANCE_ID \
-              --query "InstanceStatuses[0].InstanceStatus.Status" \
-              --output text 2>&1 || echo "initializing")
-
-            SYSTEM_STATUS=$(aws ec2 describe-instance-status \
-              --instance-ids $INSTANCE_ID \
-              --query "InstanceStatuses[0].SystemStatus.Status" \
-              --output text 2>&1 || echo "initializing")
-
-            echo "Instance status: $INSTANCE_STATUS, System status: $SYSTEM_STATUS (elapsed: ${ELAPSED}s)"
-
-            if [ "$INSTANCE_STATUS" = "ok" ] && [ "$SYSTEM_STATUS" = "ok" ]; then
-              echo "Instance health checks passed!"
-              break
-            fi
-
-            sleep $INTERVAL
-            ELAPSED=$((ELAPSED + INTERVAL))
-          done
-
-          if [ $ELAPSED -ge $MAX_WAIT ]; then
-            echo "WARNING: Instance health checks did not complete in time, but continuing..."
-          fi
-
-          # Check CloudWatch logs for UserData execution
-          echo "Checking UserData execution logs..."
-          aws logs tail /aws/ec2/ftp-server --since 30m --filter-pattern "userdata" --format short || echo "UserData logs not available yet"
-
-      - name: Install FTP client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ftp lftp
-
-      - name: Wait for FTP server to be ready (max 15 minutes)
-        run: |
-          echo "Waiting for FTP server to be ready..."
-          PUBLIC_IP="${{ steps.instance.outputs.public_ip }}"
-
-          MAX_WAIT=900  # 15 minutes
-          ELAPSED=0
-          INTERVAL=15
-
-          while [ $ELAPSED -lt $MAX_WAIT ]; do
-            echo "Testing FTP connection (elapsed: ${ELAPSED}s)..."
-
-            # Try to connect using lftp with explicit ftp:// URL format
-            # Show verbose output for debugging
-            LFTP_OUTPUT=$(timeout 30 lftp -e "set ftp:passive-mode true; set net:timeout 10; ls; quit" \
-              "ftp://${{ vars.FTP_USER }}:${{ secrets.FTP_PASSWORD }}@$PUBLIC_IP:29720" 2>&1 || true)
-
-            echo "LFTP output: $LFTP_OUTPUT"
-
-            if echo "$LFTP_OUTPUT" | grep -E "(drw|total|upload|ftp:)"; then
-              echo "FTP server is ready and accepting connections!"
-              break
-            fi
-
-            # Alternative test - just check if port is open
-            if nc -z -w 5 $PUBLIC_IP 29720; then
-              echo "FTP port is open, waiting for authentication to work..."
-            else
-              echo "FTP port not yet accessible..."
-            fi
-
-            sleep $INTERVAL
-            ELAPSED=$((ELAPSED + INTERVAL))
-          done
-
-          if [ $ELAPSED -ge $MAX_WAIT ]; then
-            echo "ERROR: Timeout waiting for FTP server to be ready"
-            echo "Checking CloudWatch logs for debugging..."
-            aws logs tail /aws/ec2/ftp-server --since 30m || true
-            exit 1
-          fi
-
-      - name: Create test file
-        run: |
-          echo "This is a test file uploaded via GitHub Actions at $(date)" > test-upload.txt
-          echo "FTP Server: ${{ steps.instance.outputs.public_ip }}:29720" >> test-upload.txt
-
-      - name: Upload test file to FTP server
-        run: |
-          echo "Uploading test file to FTP server..."
-
-          lftp -e "set ftp:passive-mode true; cd upload; put test-upload.txt; ls; quit" \
-            "ftp://${{ vars.FTP_USER }}:${{ secrets.FTP_PASSWORD }}@${{ steps.instance.outputs.public_ip }}:29720"
-
-          echo "File uploaded successfully!"
-
-      - name: Verify file upload
-        run: |
-          echo "Waiting 30 seconds for cron job to process file..."
-          sleep 30
-
-          echo "Checking if file was moved to S3..."
-          if aws s3 ls s3://${{ vars.S3_BUCKET }}/incoming/test-upload.txt; then
-            echo "SUCCESS: File was successfully transferred to S3!"
-          else
-            echo "WARNING: File not yet in S3, it may take up to 2 minutes for the cron job to run"
-            echo "The deployment is complete, but file transfer is asynchronous"
-          fi
-
-      - name: Display deployment summary
+          role-session-name: gha-ftp-retirement-${{ github.run_id }}
+          aws-region: us-east-2
+          allowed-account-ids: '759775734231'
+      - name: Retire instance and disk, preserve shared S3 and staging EFS
+        run: python scripts/retire_ftp.py
+      - uses: actions/upload-artifact@v4
         if: always()
-        run: |
-          echo "========================================="
-          echo "Deployment Summary"
-          echo "========================================="
-          echo "Stack Name: ${{ env.STACK_NAME }}"
-          echo "Instance ID: ${{ steps.instance.outputs.instance_id }}"
-          echo "Public IP: ${{ steps.instance.outputs.public_ip }}"
-          echo "EFS FileSystem: ${{ steps.instance.outputs.efs_id }}"
-          echo "FTP Port: 29720"
-          echo "FTP User: ${{ vars.FTP_USER }}"
-          echo "S3 Bucket: ${{ vars.S3_BUCKET }}"
-          echo "SNS Topic: ${{ vars.SNS_TOPIC_ARN }}"
-          echo "CloudWatch Log Group: /aws/ec2/ftp-server"
-          echo "========================================="
-          echo ""
-          echo "To connect via FTP:"
-          echo "ftp -p 29720 ${{ steps.instance.outputs.public_ip }}"
-          echo ""
-          echo "Files uploaded to the 'upload' folder will be automatically"
-          echo "transferred to s3://${{ vars.S3_BUCKET }}/incoming/"
-          echo ""
-          echo "EFS Storage Alert: Alarm will trigger when storage"
-          echo "exceeds 10GB for more than 24 hours."
-          echo "========================================="
-
-      - name: Check CloudWatch logs (for debugging)
-        if: failure()
-        run: |
-          echo "Fetching recent CloudWatch logs..."
-          aws logs tail /aws/ec2/ftp-server --since 1h --format short || echo "No logs available yet"
+        with:
+          name: ftp-retirement-evidence
+          path: retirement-evidence.json
+          if-no-files-found: warn

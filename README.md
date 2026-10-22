@@ -1,5 +1,17 @@
 # EC2 FTP to S3 Automated Deployment
 
+## Retirement status — 2026-10-22
+
+The FTP server is retired. The current workflow performs manual retirement only;
+pushes cannot recreate EC2. `ServerEnabled` defaults to `false` in the retained
+CloudFormation blueprint. The shared `kill-snap` bucket and FTP staging EFS remain.
+
+Rebuilding requires Jeremy's explicit approval for EC2 creation and a reviewed
+GitHub Actions/OIDC rebuild workflow. Reuse the existing stack parameters and
+GitHub configuration; do not read or print password values. The last provisioning
+workflow is retained in Git at `0d08224b13f95a4457b6e67758c6ff2667e3ed0d`.
+The operating notes below are historical rebuild references, not an active deploy path.
+
 Automated deployment of an EC2 instance with FTP server that uploads files to S3, with CloudWatch logging integration.
 
 ## Overview

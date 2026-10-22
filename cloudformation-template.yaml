@@ -2,6 +2,12 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: 'EC2 FTP Server with CloudWatch Logging and S3 Integration'
 
 Parameters:
+  ServerEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['false', 'true']
+    Description: Retired by default. Enabling EC2 requires an explicitly approved rebuild.
+
   InstanceType:
     Type: String
     Default: t3.micro
@@ -43,6 +49,7 @@ Parameters:
     Default: ''
 
 Conditions:
+  IsFTPServerEnabled: !Equals [!Ref ServerEnabled, 'true']
   HasKeyName: !Not [!Equals [!Ref KeyName, '']]
   HasDomainName: !Not [!Equals [!Ref DomainName, '']]
   HasSNSTopic: !Not [!Equals [!Ref SNSTopicArn, '']]
@@ -230,6 +237,7 @@ Resources:
   # CloudWatch Alarm for EFS Storage > 10GB for 1 day
   FTPServer:
     Type: AWS::EC2::Instance
+    Condition: IsFTPServerEnabled
     DependsOn: EFSMountTarget
     Properties:
       InstanceType: !Ref InstanceType
@@ -610,18 +618,21 @@ Resources:
 
 Outputs:
   InstanceId:
+    Condition: IsFTPServerEnabled
     Description: EC2 Instance ID
     Value: !Ref FTPServer
     Export:
       Name: !Sub '${AWS::StackName}-InstanceId'
 
   PublicIP:
+    Condition: IsFTPServerEnabled
     Description: Public IP address of FTP server
     Value: !GetAtt FTPServer.PublicIp
     Export:
       Name: !Sub '${AWS::StackName}-PublicIP'
 
   FTPPort:
+    Condition: IsFTPServerEnabled
     Description: FTP port
     Value: 29720
     Export:
