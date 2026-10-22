@@ -37,6 +37,16 @@ def previous_parameters(keys):
         {'ParameterKey': 'ServerEnabled', 'ParameterValue': 'false'}]
 
 
+def export_imports(name):
+    result = command('cloudformation', 'list-imports', '--export-name', name)
+    if result.returncode:
+        if ('(ValidationError)' in result.stderr
+                and f"Export '{name}' is not imported by any stack." in result.stderr):
+            return []
+        raise RuntimeError(result.stderr.strip())
+    return json.loads(result.stdout)['Imports']
+
+
 def validate_changes(change):
     if change.get('NextToken') or len(change.get('Changes', [])) != 1:
         raise ValueError('Expected exactly one resource removal')
@@ -96,7 +106,7 @@ def main():
                 or not disks[0]['Ebs'].get('DeleteOnTermination')):
             raise ValueError('Unexpected root disk or deletion policy')
         for output in ('InstanceId', 'PublicIP', 'FTPPort'):
-            if aws('cloudformation', 'list-imports', '--export-name', STACK + '-' + output)['Imports']:
+            if export_imports(STACK + '-' + output):
                 raise ValueError('Another stack imports an FTP endpoint output')
         name = 'retire-ftp-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
         aws('cloudformation', 'create-change-set', '--stack-name', STACK, '--change-set-name', name,

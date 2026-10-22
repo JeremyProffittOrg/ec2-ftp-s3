@@ -5,6 +5,20 @@ import retire_ftp as retire
 
 
 class RetirementTests(unittest.TestCase):
+    def test_list_imports_accepts_only_the_specific_no_consumers_error(self):
+        name = retire.STACK + '-InstanceId'
+        result = retire.subprocess.CompletedProcess([], 255, '',
+            f"(ValidationError) when calling the ListImports operation: Export '{name}' is not imported by any stack.")
+        with patch.object(retire, 'command', return_value=result):
+            self.assertEqual(retire.export_imports(name), [])
+        result.stderr = 'An error occurred (AccessDenied) when calling ListImports'
+        with patch.object(retire, 'command', return_value=result):
+            with self.assertRaisesRegex(RuntimeError, 'AccessDenied'):
+                retire.export_imports(name)
+        result = retire.subprocess.CompletedProcess([], 0, '{"Imports":["another-stack"]}', '')
+        with patch.object(retire, 'command', return_value=result):
+            self.assertEqual(retire.export_imports(name), ['another-stack'])
+
     def test_exact_removal_and_rejection_of_other_resource_mutations(self):
         change = {'Changes': [{'ResourceChange': {'LogicalResourceId': 'FTPServer',
                   'ResourceType': 'AWS::EC2::Instance', 'PhysicalResourceId': retire.INSTANCE,
